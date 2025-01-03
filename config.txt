@@ -1,0 +1,21 @@
+# Configuration File for macOS Apps Installation Script
+
+# Minimum macOS version required
+REQUIRED_VERSION=13.0
+
+# Maximum number of retries for failed installations
+MAX_RETRIES=3
+
+# Delay (in seconds) between retry attempts
+RETRY_DELAY=5
+
+# Enable or disable dry run mode (true/false)
+DRY_RUN=false
+
+# Enable or disable verbose mode for detailed logs (true/false)
+VERBOSE_MODE=true
+
+# Cooldown period (in seconds) before retrying failed installations
+COOLDOWN_PERIOD=30
+
+
