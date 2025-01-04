@@ -57,45 +57,64 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-# Function to check, install, and update dependencies
-check_and_update_dependencies() {
-  local dependencies=(xcode-select brew curl)
+# Function to check, install, and update xcode-select
+check_xcode_select() {
+  if ! command_exists "xcode-select"; then
+    print_message yellow "xcode-select is not installed. Installing..."
+    xcode-select --install || {
+      print_message red "Failed to install xcode-select. Exiting."
+      exit 1
+    }
+  else
+    print_message green "xcode-select is already installed."
+  fi
+}
 
-  for dep in "${dependencies[@]}"; do
-    if ! command_exists "$dep"; then
-      print_message yellow "$dep is not installed. Installing..."
-      if [ "$dep" = "xcode-select" ]; then
-        xcode-select --install || {
-          print_message red "Failed to install xcode-select. Exiting."
-          exit 1
-        }
-      elif [ "$dep" = "brew" ]; then
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
-          print_message red "Failed to install Homebrew. Exiting."
-          exit 1
-        }
-      elif [ "$dep" = "curl" ]; then
-        retry_with_backoff $MAX_RETRIES sudo brew install curl || {
-          print_message red "Failed to install curl. Exiting."
-          exit 1
-        }
-      fi
-    else
-      print_message green "$dep is already installed."
-      if [ "$dep" = "brew" ]; then
-        print_message green "Updating Homebrew..."
-        retry_with_backoff $MAX_RETRIES brew update || {
-          print_message red "Failed to update Homebrew. Exiting."
-          exit 1
-        }
-      fi
-    fi
-  done
+# Function to check, install, and update Homebrew
+check_brew() {
+  if ! command_exists "brew"; then
+    print_message yellow "Homebrew is not installed. Installing..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
+      print_message red "Failed to install Homebrew. Exiting."
+      exit 1
+    }
+  else
+    print_message green "Homebrew is already installed. Updating..."
+    retry_with_backoff $MAX_RETRIES brew update || {
+      print_message red "Failed to update Homebrew. Exiting."
+      exit 1
+    }
+  fi
+}
+
+# Function to check, install, and update curl
+check_curl() {
+  if ! command_exists "curl"; then
+    print_message yellow "curl is not installed. Installing..."
+    retry_with_backoff $MAX_RETRIES sudo brew install curl || {
+      print_message red "Failed to install curl. Exiting."
+      exit 1
+    }
+  else
+    print_message green "curl is already installed."
+  fi
+}
+
+# Function to check and update all dependencies
+check_and_update_dependencies() {
+  check_xcode_select
+  check_brew
+  check_curl
 }
 
 # System resource checks
 check_system_resources() {
-  local available_space=$(df / | tail -1 | awk '{print $4}')
+  local available_space=$(df --output=avail / 2>/dev/null | tail -1)
+  if [[ -z "$available_space" ]] || ! [[ "$available_space" =~ ^[0-9]+$ ]]; then
+    print_message red "Failed to retrieve available disk space. Ensure 'df' is functioning correctly."
+    exit 1
+  fi
+
   if (( available_space < REQUIRED_SPACE )); then
     print_message red "Insufficient disk space. At least 10GB is required."
     exit 1
@@ -103,11 +122,20 @@ check_system_resources() {
   print_message green "Sufficient disk space detected."
 
   local cpu_usage=$(ps -A -o %cpu | awk '{s+=$1} END {print s}')
+  local mem_free=$(vm_stat | awk '/Pages free/ {print $3}' | sed 's/\.//')
+  local mem_free_mb=$((mem_free * 4096 / 1024 / 1024))
+
   if (( $(echo "$cpu_usage > 80" | bc -l) )); then
     print_message red "High CPU usage detected: ${cpu_usage}%"
     exit 1
   fi
-  print_message green "CPU usage is within acceptable limits."
+
+  if (( mem_free_mb < 512 )); then
+    print_message red "Low memory detected: ${mem_free_mb}MB free."
+    exit 1
+  fi
+
+  print_message green "CPU usage and memory are within acceptable limits."
 }
 
 # Function to retry commands with exponential backoff
@@ -119,7 +147,7 @@ retry_with_backoff() {
 
   while [ $attempt -le $max_attempts ]; do
     print_message yellow "Attempt $attempt: $command"
-    $command && return 0
+    $command 2>>"$LOG_FILE" && return 0
     sleep $((RETRY_DELAY * 2 ** (attempt - 1)))
     attempt=$((attempt + 1))
   done
@@ -147,11 +175,13 @@ install_or_upgrade_app() {
 
   if [ "$is_cask" = true ]; then
     retry_with_backoff $MAX_RETRIES sudo brew install --cask "$app" && success_apps+=("$app") || {
+      print_message red "Installation of $app failed. See $LOG_FILE for details."
       failed_apps+=("$app")
       rollback_apps+=("$app")
     }
   else
     retry_with_backoff $MAX_RETRIES sudo brew install "$app" && success_apps+=("$app") || {
+      print_message red "Installation of $app failed. See $LOG_FILE for details."
       failed_apps+=("$app")
       rollback_apps+=("$app")
     }
@@ -237,15 +267,6 @@ load_configuration() {
   fi
 }
 
-# Job queue to manage parallel execution
-manage_jobs() {
-  while (( current_jobs >= MAX_PARALLEL_JOBS )); do
-    wait -n
-    current_jobs=$((current_jobs - 1))
-  done
-  current_jobs=$((current_jobs + 1))
-}
-
 # Main function
 main() {
   print_message green "Starting macOS setup script..."
@@ -285,15 +306,11 @@ main() {
 
   # Install applications
   for app_entry in "${apps[@]}"; do
-    manage_jobs
     local app_name=$(echo "$app_entry" | cut -d":" -f1)
     local is_cask=$(echo "$app_entry" | cut -d":" -f2)
     print_message green "Installing: $app_name"
-    install_or_upgrade_app "$app_name" "$is_cask" &
+    install_or_upgrade_app "$app_name" "$is_cask"
   done
-
-  # Wait for all background processes to finish
-  wait
 
   # Provide feedback
   summary_feedback
