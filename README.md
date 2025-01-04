@@ -13,6 +13,7 @@ This script automates the installation and upgrade of essential applications on 
 - **Disk Space Validation**: Ensures sufficient disk space for installations.
 - **Verbose and Quiet Modes**: Toggle between detailed logs or minimal output.
 - **Dry Run Mode**: Simulates installation steps without making changes.
+- **Custom Application Lists**: Allows users to specify their own list of applications for installation.
 
 ## Prerequisites
 
@@ -52,7 +53,7 @@ Update the `config.txt` file to customize the following:
 
 ## Applications Installed
 
-The script installs the following applications:
+By default, the script installs the following applications:
 
 - CleanMyMac X
 - iTerm2

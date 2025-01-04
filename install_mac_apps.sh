@@ -52,6 +52,28 @@ print_message() {
   fi
 }
 
+# Internet connectivity check
+check_internet_connectivity() {
+  local fallback_url="https://www.cloudflare.com/"
+  if command_exists "curl"; then
+    curl -s https://www.google.com > /dev/null || curl -s "$fallback_url" > /dev/null
+  elif command_exists "wget"; then
+    wget -q --spider https://www.google.com || wget -q --spider "$fallback_url"
+  elif command_exists "ping"; then
+    ping -c 1 google.com &>/dev/null || ping -c 1 example.com &>/dev/null
+  else
+    print_message red "No valid network checking tool is installed. Please install curl, wget, or ensure ping is available."
+    exit 1
+  fi
+
+  if [ $? -ne 0 ]; then
+    print_message red "No internet connection. Please check your network."
+    exit 1
+  fi
+
+  print_message green "Internet connection is active."
+}
+
 # Function to check if a command exists
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -109,7 +131,8 @@ check_and_update_dependencies() {
 
 # System resource checks
 check_system_resources() {
-  local available_space=$(df --output=avail / 2>/dev/null | tail -1)
+  local available_space
+  available_space=$(df --output=avail / 2>/dev/null | tail -1)
   if [[ -z "$available_space" ]] || ! [[ "$available_space" =~ ^[0-9]+$ ]]; then
     print_message red "Failed to retrieve available disk space. Ensure 'df' is functioning correctly."
     exit 1
@@ -121,8 +144,10 @@ check_system_resources() {
   fi
   print_message green "Sufficient disk space detected."
 
-  local cpu_usage=$(ps -A -o %cpu | awk '{s+=$1} END {print s}')
-  local mem_free=$(vm_stat | awk '/Pages free/ {print $3}' | sed 's/\.//')
+  local cpu_usage
+  local mem_free
+  cpu_usage=$(ps -A -o %cpu | awk '{s+=$1} END {print s}')
+  mem_free=$(vm_stat | awk '/Pages free/ {print $3}' | sed 's/\.//')
   local mem_free_mb=$((mem_free * 4096 / 1024 / 1024))
 
   if (( $(echo "$cpu_usage > 80" | bc -l) )); then
@@ -138,7 +163,7 @@ check_system_resources() {
   print_message green "CPU usage and memory are within acceptable limits."
 }
 
-# Function to retry commands with exponential backoff
+# Retry logic with dynamic delays
 retry_with_backoff() {
   local attempt=1
   local max_attempts=$1
@@ -146,13 +171,28 @@ retry_with_backoff() {
   local command="$@"
 
   while [ $attempt -le $max_attempts ]; do
-    print_message yellow "Attempt $attempt: $command"
+    local delay=$((RETRY_DELAY * attempt + RANDOM % 5))
+    print_message yellow "Attempt $attempt: $command (Retry in $delay seconds)"
     $command 2>>"$LOG_FILE" && return 0
-    sleep $((RETRY_DELAY * 2 ** (attempt - 1)))
+    sleep $delay
     attempt=$((attempt + 1))
   done
   print_message red "All retry attempts failed: $command"
   return 1
+}
+
+# Fail-safe mechanism
+setup_fail_safe() {
+  trap "print_message red 'Script terminated unexpectedly. Cleaning up...'; exit 1" SIGINT SIGTERM
+}
+
+# Parallel execution setup
+manage_jobs() {
+  while (( current_jobs >= MAX_PARALLEL_JOBS )); do
+    wait -n
+    current_jobs=$((current_jobs - 1))
+  done
+  current_jobs=$((current_jobs + 1))
 }
 
 # Dry run simulation
@@ -161,10 +201,27 @@ simulate_installation() {
   print_message yellow "[Dry Run] Simulating installation of $app."
 }
 
+# Load applications from configuration file
+load_apps_from_config() {
+  if [ -f "$CONFIG_FILE" ]; then
+    apps=($(grep -v '^#' "$CONFIG_FILE" | grep -v '^$'))
+    print_message green "Applications loaded from configuration file: ${apps[@]}"
+  else
+    print_message red "Configuration file not found. Exiting."
+    exit 1
+  fi
+}
+
 # Install or upgrade applications
 install_or_upgrade_app() {
   local app=$1
   local is_cask=$2
+
+  # Validate is_cask input
+  if [[ "$is_cask" != true && "$is_cask" != false ]]; then
+    print_message red "Invalid value for is_cask: $is_cask. Must be 'true' or 'false'. Exiting."
+    exit 1
+  fi
 
   local start_time=$(date +%s)
 
@@ -225,98 +282,37 @@ summary_feedback() {
   done
 }
 
-# Environment check
-check_environment() {
-  if [[ "$OSTYPE" != "darwin"* ]]; then
-    print_message red "This script is designed to run on macOS. Exiting."
-    exit 1
-  fi
-
-  local current_version=$(sw_vers -productVersion)
-  if [[ "$current_version" < "$REQUIRED_VERSION" ]]; then
-    print_message yellow "Your macOS version ($current_version) is below the required version ($REQUIRED_VERSION)."
-    read -p "Do you want to continue anyway? (yes/no): " user_choice
-    if [[ "$user_choice" != "yes" ]]; then
-      print_message red "Exiting script due to unsupported macOS version."
-      exit 1
-    fi
-  fi
-
-  print_message green "Checking for macOS updates..."
-  if softwareupdate -l | grep -q "\* Label:"; then
-    print_message yellow "Updates are available. Installing updates..."
-    retry_with_backoff $MAX_RETRIES sudo softwareupdate -ia --verbose || {
-      print_message red "Failed to install macOS updates. Exiting."
-      exit 1
-    }
-    print_message green "macOS updates installed successfully."
-  else
-    print_message green "macOS is up to date."
-  fi
-
-  print_message green "Environment check passed. Running on macOS version $current_version."
-}
-
-# Load dynamic configuration
-load_configuration() {
-  if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-    print_message green "Configuration loaded from $CONFIG_FILE."
-  else
-    print_message yellow "Configuration file not found. Using default values."
-  fi
-}
-
 # Main function
 main() {
   print_message green "Starting macOS setup script..."
 
+  # Setup fail-safe mechanism
+  setup_fail_safe
+
+  # Check internet connectivity
+  check_internet_connectivity
+
   # Check and update dependencies
   check_and_update_dependencies
 
-  # Environment check
-  check_environment
+  # Load applications from configuration file
+  load_apps_from_config
 
-  # Load configuration
-  load_configuration
-
-  # Check system resources
+  # System resource checks
   check_system_resources
-
-  # Define applications to install
-  apps=(
-    "cleanmymac-x:true"
-    "iterm2:true"
-    "python:false"
-    "wget:false"
-    "microsoft-teams:true"
-    "onedrive:false"
-    "insomnia:true"
-    "whatsapp:true"
-    "xmind:true"
-    "the-unarchiver:true"
-    "spotify:true"
-    "vlc:true"
-    "google-chrome:true"
-    "visual-studio-code:true"
-    "git:false"
-    "github:true"
-    "docker:true"
-  )
 
   # Install applications
   for app_entry in "${apps[@]}"; do
-    local app_name=$(echo "$app_entry" | cut -d":" -f1)
-    local is_cask=$(echo "$app_entry" | cut -d":" -f2)
-    print_message green "Installing: $app_name"
-    install_or_upgrade_app "$app_name" "$is_cask"
+    manage_jobs
+    print_message green "Installing: $app_entry"
+    install_or_upgrade_app "$app_entry" false &
   done
 
-  # Provide feedback
-  summary_feedback
+  # Wait for all background jobs to complete
+  wait
 
-  print_message green "Cleaning up..."
-  sudo brew cleanup >/dev/null 2>&1
+  # Display installation summary
+  summary_feedback
 }
 
 # Run the main function
